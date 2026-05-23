@@ -17,7 +17,8 @@ export function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
-  // Check for auth cookie (Supabase sets sb-<ref>-auth-token)
+  // Check for Supabase auth cookie (set by our custom storage provider)
+  // The cookie name pattern is: sb-<ref>-auth-token
   const hasAuthCookie = request.cookies.getAll().some((c) => c.name.includes('auth-token'))
 
   if (!hasAuthCookie) {
