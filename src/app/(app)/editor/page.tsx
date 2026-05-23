@@ -1,7 +1,7 @@
 'use client'
 
 /* eslint-disable */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import {
@@ -12,7 +12,11 @@ import {
   Film,
   Palette,
   Sparkles,
+  MessageSquare,
+  RotateCcw,
+  TrendingUp,
 } from 'lucide-react'
+import { Suspense } from 'react'
 
 const STYLES = [
   { id: 'cinematic', label: 'Cinematic', desc: 'Dramatic reveals, smooth camera moves' },
@@ -27,18 +31,17 @@ const DURATIONS = [
   { id: '60', label: '60s' },
 ]
 
-type PipelineStep = 'idle' | 'capturing' | 'composing' | 'rendering' | 'complete' | 'failed'
+type PipelineStep = 'idle' | 'queued' | 'capturing' | 'composing' | 'rendering' | 'complete' | 'failed'
 
 const STEP_LABELS: Record<PipelineStep, string> = {
   idle: 'Ready',
+  queued: 'Queued — waiting for worker...',
   capturing: 'Capturing website...',
   composing: 'AI composing video...',
   rendering: 'Rendering MP4...',
   complete: 'Complete!',
   failed: 'Failed',
 }
-
-import { Suspense } from 'react'
 
 export default function EditorPage() {
   return (
@@ -51,21 +54,30 @@ export default function EditorPage() {
 function EditorContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const pollRef = useRef<NodeJS.Timeout | null>(null)
+
   const [url, setUrl] = useState('')
   const [style, setStyle] = useState('cinematic')
-  const [duration, setDuration] = useState('30')
+  const [duration, setDuration] = useState('15')
   const [step, setStep] = useState<PipelineStep>('idle')
-  const [_currentProjectId, setCurrentProjectId] = useState<string | null>(null)
+  const [projectId, setProjectId] = useState<string | null>(null)
+  const [jobId, setJobId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [videoUrl, setVideoUrl] = useState('')
   const [projectTitle, setProjectTitle] = useState('')
+  const [progress, setProgress] = useState(0)
+
+  // Prompt editing
+  const [prompt, setPrompt] = useState('')
+  const [enhancedPrompt, setEnhancedPrompt] = useState('')
+  const [isEnhancing, setIsEnhancing] = useState(false)
+  const [showPromptEditor, setShowPromptEditor] = useState(false)
 
   // Load existing project if ?project= provided
   useEffect(() => {
     const pid = searchParams.get('project')
-    if (pid) {
-      loadProject(pid)
-    }
+    if (pid) loadProject(pid)
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [searchParams])
 
   async function loadProject(pid: string) {
@@ -76,22 +88,26 @@ function EditorContent() {
       .single()
 
     if (data) {
-      setCurrentProjectId(data.id)
+      setProjectId(data.id)
       setUrl(data.url)
       setProjectTitle(data.title || data.url)
+      setShowPromptEditor(true)
+
       if (data.status === 'complete') {
-        // Find the latest version with a video
         const { data: versions } = await supabase
           .from('soonsnap_versions')
           .select('*')
           .eq('project_id', data.id)
-          .eq('status', 'complete')
           .order('version_num', { ascending: false })
-          .limit(1)
 
-        if (versions && versions.length > 0 && versions[0].video_url) {
-          setVideoUrl(versions[0].video_url)
-          setStep('complete')
+        if (versions && versions.length > 0) {
+          const latest = versions[0]
+          if (latest.video_url) {
+            setVideoUrl(latest.video_url)
+            setStep('complete')
+          }
+          if (latest.prompt) setPrompt(latest.prompt)
+          if (latest.enhanced_prompt) setEnhancedPrompt(latest.enhanced_prompt)
         }
       } else if (data.status === 'failed') {
         setStep('failed')
@@ -99,115 +115,148 @@ function EditorContent() {
     }
   }
 
+  const pollJob = useCallback(async (jid: string) => {
+    try {
+      const res = await fetch(`/api/jobs/${jid}`)
+      const data = await res.json()
+      if (!data.ok) return
+
+      const { status, progress: prog, result } = data.job
+
+      setProgress(prog || 0)
+
+      // Map job progress to pipeline steps
+      if (status === 'queued') setStep('queued')
+      else if (status === 'running') {
+        if (prog < 30) setStep('capturing')
+        else if (prog < 50) setStep('composing')
+        else setStep('rendering')
+      } else if (status === 'complete') {
+        setStep('complete')
+        setProgress(100)
+        if (result?.videoUrl) setVideoUrl(result.videoUrl)
+        if (pollRef.current) clearInterval(pollRef.current)
+      } else if (status === 'failed') {
+        setStep('failed')
+        setError(data.job.error || 'Render failed')
+        if (pollRef.current) clearInterval(pollRef.current)
+      }
+    } catch {}
+  }, [])
+
+  function startPolling(jid: string) {
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = setInterval(() => pollJob(jid), 2000)
+    pollJob(jid) // initial check
+  }
+
   function isValidUrl(str: string): boolean {
     try {
       const u = new URL(str)
       return u.protocol === 'http:' || u.protocol === 'https:'
-    } catch {
-      return false
-    }
+    } catch { return false }
   }
 
   async function handleGenerate() {
     setError('')
     const trimmed = url.trim()
-    if (!trimmed) {
-      setError('Please enter a URL')
-      return
-    }
-    if (!trimmed.startsWith('http')) {
-      setUrl('https://' + trimmed)
-    }
+    if (!trimmed) { setError('Please enter a URL'); return }
     const finalUrl = trimmed.startsWith('http') ? trimmed : 'https://' + trimmed
-    if (!isValidUrl(finalUrl)) {
-      setError('Please enter a valid URL')
-      return
-    }
+    if (!isValidUrl(finalUrl)) { setError('Please enter a valid URL'); return }
 
-    // Get user
     const { data: { user } } = await supabase.auth.getUser()
-    if (!user) {
-      router.push('/login')
-      return
-    }
+    if (!user) { router.push('/login'); return }
 
-    // Create project in DB
-    setStep('capturing')
-    const { data: project, error: dbError } = await supabase
-      .from('soonsnap_projects')
-      .insert({
-        user_id: user.id,
-        url: finalUrl,
-        title: new URL(finalUrl).hostname,
-        status: 'capturing',
-      })
-      .select()
-      .single()
+    setStep('queued')
+    setProgress(0)
 
-    if (dbError || !project) {
-      setError('Failed to create project')
-      setStep('failed')
-      return
-    }
+    let pid = projectId
 
-    setCurrentProjectId(project.id)
-    setProjectTitle(project.title)
+    // Create project if new
+    if (!pid) {
+      const { data: project, error: dbError } = await supabase
+        .from('soonsnap_projects')
+        .insert({
+          user_id: user.id,
+          url: finalUrl,
+          title: new URL(finalUrl).hostname,
+          status: 'queued',
+        })
+        .select()
+        .single()
 
-    try {
-      // Step 1: Capture
-      const captureRes = await fetch('/api/capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: finalUrl, projectId: project.id }),
-      })
-      const captureData = await captureRes.json()
-
-      if (!captureData.ok) {
-        throw new Error(captureData.error || 'Capture failed')
+      if (dbError || !project) {
+        setError('Failed to create project')
+        setStep('failed')
+        return
       }
+      pid = project.id
+      setProjectId(project.id)
+      setProjectTitle(project.title)
+      setShowPromptEditor(true)
+    }
 
-      // Step 2: Compose + Render
-      setStep('composing')
-      const renderRes = await fetch('/api/render', {
+    // Enqueue render job
+    try {
+      const res = await fetch('/api/render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          projectId: project.id,
+          projectId: pid,
+          url: finalUrl,
           style,
-          duration,
-          tokens: captureData.tokens,
-          title: captureData.title,
+          duration: Number(duration),
+          prompt: enhancedPrompt || prompt || `${style} style, ${duration}s`,
+          enhancedPrompt,
         }),
       })
-      const renderData = await renderRes.json()
+      const data = await res.json()
 
-      if (!renderData.ok) {
-        throw new Error(renderData.error || 'Render failed')
-      }
+      if (!data.ok) throw new Error(data.error || 'Failed to enqueue')
 
-      setVideoUrl(renderData.videoUrl)
-      setStep('complete')
+      setJobId(data.jobId)
+      startPolling(data.jobId)
     } catch (err: any) {
       setError(err.message || 'Something went wrong')
       setStep('failed')
-      // Update project status
-      if (project.id) {
-        await supabase
-          .from('soonsnap_projects')
-          .update({ status: 'failed' })
-          .eq('id', project.id)
-      }
     }
   }
 
-  const isProcessing = ['capturing', 'composing', 'rendering'].includes(step)
+  async function handleEnhance() {
+    if (!prompt.trim()) return
+    setIsEnhancing(true)
+    try {
+      const res = await fetch('/api/enhance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          style,
+          duration,
+          siteTitle: projectTitle,
+        }),
+      })
+      const data = await res.json()
+      if (data.ok && data.enhancedPrompt) {
+        setEnhancedPrompt(data.enhancedPrompt)
+      } else {
+        setError(data.error || 'Enhancement failed')
+      }
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setIsEnhancing(false)
+    }
+  }
+
+  const isProcessing = ['queued', 'capturing', 'composing', 'rendering'].includes(step)
 
   return (
     <div className="max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold mb-2">Create Video</h1>
       <p className="text-[#999] text-sm mb-8">Paste a URL, pick a style, get a video</p>
 
-      {/* URL Input */}
+      {/* URL Input + Style + Duration */}
       <div className="rounded-2xl border border-border bg-card p-6 mb-6">
         <label className="block text-sm font-medium text-[#999] mb-2">Website URL</label>
         <div className="flex gap-3">
@@ -234,9 +283,7 @@ function EditorContent() {
                 onClick={() => setStyle(s.id)}
                 disabled={isProcessing}
                 className={`rounded-xl border p-3 text-left transition-all ${
-                  style === s.id
-                    ? 'border-gold bg-gold/10'
-                    : 'border-border hover:border-[#444]'
+                  style === s.id ? 'border-gold bg-gold/10' : 'border-border hover:border-[#444]'
                 } disabled:opacity-50`}
               >
                 <span className="text-sm font-medium">{s.label}</span>
@@ -256,9 +303,7 @@ function EditorContent() {
                 onClick={() => setDuration(d.id)}
                 disabled={isProcessing}
                 className={`rounded-xl border px-5 py-2.5 text-sm font-medium transition-all ${
-                  duration === d.id
-                    ? 'border-gold bg-gold/10 text-gold'
-                    : 'border-border text-[#999] hover:border-[#444]'
+                  duration === d.id ? 'border-gold bg-gold/10 text-gold' : 'border-border text-[#999] hover:border-[#444]'
                 } disabled:opacity-50`}
               >
                 {d.label}
@@ -267,7 +312,44 @@ function EditorContent() {
           </div>
         </div>
 
-        {/* Generate button */}
+        {/* Prompt Editor (visible when project loaded or after first generate) */}
+        {showPromptEditor && (
+          <div className="mt-5 pt-5 border-t border-border">
+            <label className="block text-sm font-medium text-[#999] mb-2">
+              <MessageSquare size={14} className="inline mr-1 -mt-0.5" />
+              Custom Prompt
+            </label>
+            <textarea
+              value={prompt}
+              onChange={(e) => { setPrompt(e.target.value); setEnhancedPrompt('') }}
+              disabled={isProcessing}
+              rows={3}
+              placeholder="Describe the video you want... e.g. 'Show the pricing section with bold transitions'"
+              className="w-full rounded-xl border border-border bg-void px-4 py-3 text-sm text-[#F8F9FC] placeholder-[#555] resize-none focus:border-teal disabled:opacity-50"
+            />
+
+            {/* Enhanced prompt preview */}
+            {enhancedPrompt && (
+              <div className="mt-2 rounded-xl border border-teal/30 bg-teal/5 p-3">
+                <p className="text-xs text-teal mb-1 font-medium">✨ Enhanced prompt:</p>
+                <p className="text-sm text-[#ccc]">{enhancedPrompt}</p>
+              </div>
+            )}
+
+            <div className="flex gap-3 mt-3">
+              <button
+                onClick={handleEnhance}
+                disabled={isProcessing || isEnhancing || !prompt.trim()}
+                className="rounded-xl border border-teal/30 bg-teal/10 px-4 py-2 text-sm text-teal hover:bg-teal/20 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {isEnhancing ? <Loader2 size={14} className="animate-spin" /> : <TrendingUp size={14} />}
+                Enhance Prompt
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Generate / Re-render button */}
         <button
           onClick={handleGenerate}
           disabled={isProcessing || !url.trim()}
@@ -276,12 +358,12 @@ function EditorContent() {
           {isProcessing ? (
             <>
               <Loader2 size={18} className="animate-spin" />
-              {STEP_LABELS[step]}
+              {STEP_LABELS[step]} {progress > 0 && `(${progress}%)`}
             </>
           ) : step === 'complete' ? (
             <>
-              <Sparkles size={18} />
-              Generate Another
+              <RotateCcw size={18} />
+              Re-render with current settings
             </>
           ) : (
             <>
@@ -301,36 +383,22 @@ function EditorContent() {
       )}
 
       {/* Pipeline progress */}
-      {step !== 'idle' && (
+      {isProcessing && (
         <div className="rounded-2xl border border-border bg-card p-6 mb-6">
           <h3 className="text-sm font-medium text-[#999] mb-4">Pipeline Status</h3>
+          {/* Progress bar */}
+          <div className="w-full h-2 bg-void rounded-full mb-4 overflow-hidden">
+            <div
+              className="h-full bg-gold rounded-full transition-all duration-500"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
           <div className="flex items-center gap-4">
-            {/* Capture */}
-            <StepIcon
-              done={['composing', 'rendering', 'complete'].includes(step)}
-              active={step === 'capturing'}
-              failed={step === 'failed'}
-              icon={<Palette size={18} />}
-              label="Capture"
-            />
+            <StepIcon done={progress > 30} active={step === 'queued' || step === 'capturing'} failed={false} icon={<Palette size={18} />} label="Capture" />
             <div className="flex-1 h-px bg-border" />
-            {/* Compose */}
-            <StepIcon
-              done={['rendering', 'complete'].includes(step)}
-              active={step === 'composing'}
-              failed={false}
-              icon={<Sparkles size={18} />}
-              label="Compose"
-            />
+            <StepIcon done={progress > 50} active={step === 'composing'} failed={false} icon={<Sparkles size={18} />} label="Compose" />
             <div className="flex-1 h-px bg-border" />
-            {/* Render */}
-            <StepIcon
-              done={step === 'complete'}
-              active={step === 'rendering'}
-              failed={false}
-              icon={<Film size={18} />}
-              label="Render"
-            />
+            <StepIcon done={step === 'complete'} active={step === 'rendering'} failed={false} icon={<Film size={18} />} label="Render" />
           </div>
         </div>
       )}
@@ -339,12 +407,7 @@ function EditorContent() {
       {step === 'complete' && videoUrl && (
         <div className="rounded-2xl border border-border bg-card overflow-hidden">
           <div className="aspect-video bg-black relative">
-            <video
-              src={videoUrl}
-              controls
-              className="w-full h-full"
-              autoPlay
-            />
+            <video src={videoUrl} controls className="w-full h-full" autoPlay />
           </div>
           <div className="p-4 flex items-center justify-between">
             <div>
@@ -366,11 +429,7 @@ function EditorContent() {
 }
 
 function StepIcon({ done, active, failed, icon, label }: {
-  done: boolean
-  active: boolean
-  failed: boolean
-  icon: React.ReactNode
-  label: string
+  done: boolean; active: boolean; failed: boolean; icon: React.ReactNode; label: string
 }) {
   return (
     <div className="flex flex-col items-center gap-1.5">
@@ -383,9 +442,7 @@ function StepIcon({ done, active, failed, icon, label }: {
         {done ? <CheckCircle2 size={18} /> : icon}
       </div>
       <span className={`text-xs ${
-        done ? 'text-green-400' :
-        active ? 'text-gold' :
-        'text-[#555]'
+        done ? 'text-green-400' : active ? 'text-gold' : 'text-[#555]'
       }`}>{label}</span>
     </div>
   )

@@ -1,61 +1,76 @@
+/* eslint-disable */
 import { NextRequest, NextResponse } from 'next/server'
-import { readFileSync, existsSync, statSync } from 'fs'
+import { readFileSync, statSync, existsSync } from 'fs'
 import { join } from 'path'
 
-const VIDEOS_DIR = '/tmp/soonsnap-videos'
+const VIDEOS_DIR = process.env.VIDEOS_DIR || '/tmp/soonsnap-videos'
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = params
+  const { id } = await params
+  const { searchParams } = new URL(req.url)
+  const version = searchParams.get('v')
 
-  // Sanitize ID (prevent path traversal)
-  if (!id || !/^[0-9a-f-]{36}$/.test(id)) {
-    return NextResponse.json({ error: 'Invalid ID' }, { status: 400 })
+  // Try version-specific file first, then fallback to project-level
+  let filePath: string | null = null
+
+  if (version) {
+    const versioned = join(VIDEOS_DIR, `${id}_v${version}.mp4`)
+    if (existsSync(versioned)) filePath = versioned
   }
 
-  const videoPath = join(VIDEOS_DIR, `${id}.mp4`)
-
-  if (!existsSync(videoPath)) {
-    return NextResponse.json({ error: 'Video not found' }, { status: 404 })
+  if (!filePath) {
+    // Try to find latest version file
+    const { execSync } = require('child_process')
+    try {
+      const files = execSync(`ls -t ${VIDEOS_DIR}/${id}_v*.mp4 2>/dev/null | head -1`, { encoding: 'utf-8' }).trim()
+      if (files) filePath = files
+    } catch {}
   }
 
-  const stat = statSync(videoPath)
-  const fileSize = stat.size
+  if (!filePath) {
+    // Legacy fallback: project-level file
+    const legacy = join(VIDEOS_DIR, `${id}.mp4`)
+    if (existsSync(legacy)) filePath = legacy
+  }
 
-  // Handle range requests for video seeking
+  if (!filePath || !existsSync(filePath)) {
+    return NextResponse.json({ ok: false, error: 'Video not found' }, { status: 404 })
+  }
+
+  const stat = statSync(filePath)
   const range = req.headers.get('range')
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-')
     const start = parseInt(parts[0], 10)
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1
+    const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1
     const chunkSize = end - start + 1
 
-    const buffer = readFileSync(videoPath)
-    const chunk = buffer.slice(start, end + 1)
+    const buffer = Buffer.alloc(chunkSize)
+    const fd = require('fs').openSync(filePath, 'r')
+    require('fs').readSync(fd, buffer, 0, chunkSize, start)
+    require('fs').closeSync(fd)
 
-    return new NextResponse(chunk, {
+    return new NextResponse(buffer, {
       status: 206,
       headers: {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunkSize.toString(),
         'Content-Type': 'video/mp4',
-        'Cache-Control': 'public, max-age=3600',
       },
     })
   }
 
-  // Full file response
-  const buffer = readFileSync(videoPath)
+  const buffer = readFileSync(filePath)
   return new NextResponse(buffer, {
     headers: {
-      'Content-Length': fileSize.toString(),
       'Content-Type': 'video/mp4',
+      'Content-Length': stat.size.toString(),
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=3600',
     },
   })
 }
