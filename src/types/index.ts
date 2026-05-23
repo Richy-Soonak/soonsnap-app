@@ -1,75 +1,51 @@
-// ─── Tier ────────────────────────────────────────────────────────────────────
-export enum Tier {
-  Free = "free",
-  Holder = "holder",
-  Pro = "pro",
+export type Tier = 'free' | 'holder' | 'pro'
+
+export interface UserProfile {
+  id: string
+  email: string
+  tier: Tier
+  created_at: string
 }
 
-// ─── User ────────────────────────────────────────────────────────────────────
-export interface User {
-  id: string;
-  email: string;
-  displayName: string;
-  tier: Tier;
-  walletAddress?: string; // Solana wallet (required for Holder tier)
-  stripeCustomerId?: string;
-  credits: number; // Pro tier credits
-  createdAt: string;
-  updatedAt: string;
+export interface Project {
+  id: string
+  user_id: string
+  url: string
+  title: string
+  status: 'capturing' | 'composing' | 'rendering' | 'complete' | 'failed'
+  created_at: string
+  updated_at: string
 }
 
-// ─── Video ───────────────────────────────────────────────────────────────────
-export interface Video {
-  id: string;
-  userId: string;
-  sourceUrl: string; // the captured website URL
-  title: string;
-  status: VideoStatus;
-  durationSeconds: number;
-  resolution: string;
-  outputUrl?: string; // R2 / CDN URL to the final video
-  thumbnailUrl?: string;
-  createdAt: string;
-  updatedAt: string;
+export interface Version {
+  id: string
+  project_id: string
+  version_num: number
+  prompt: string
+  enhanced_prompt: string | null
+  video_url: string | null
+  thumbnail_url: string | null
+  duration: number | null
+  status: 'pending' | 'rendering' | 'complete' | 'failed'
+  created_at: string
 }
 
-export enum VideoStatus {
-  Queued = "queued",
-  Capturing = "capturing",
-  Rendering = "rendering",
-  Enhancing = "enhancing",
-  Complete = "complete",
-  Failed = "failed",
+export interface CreditBalance {
+  id: string
+  user_id: string
+  balance: number
+  updated_at: string
 }
 
-// ─── Render ──────────────────────────────────────────────────────────────────
-export interface Render {
-  id: string;
-  videoId: string;
-  jobId: string; // BullMQ job ID
-  framesTotal: number;
-  framesComplete: number;
-  style?: string; // cinematic preset
-  engine: string; // "hyperframes" | "nvidia"
-  startedAt: string;
-  completedAt?: string;
+export interface Wallet {
+  id: string
+  user_id: string
+  wallet_address: string
+  verified_at: string
 }
 
-// ─── API helpers ─────────────────────────────────────────────────────────────
-export interface ApiResponse<T = unknown> {
-  data?: T;
-  error?: string;
-}
-
-export interface CaptureRequest {
-  url: string;
-  style?: string;
-  resolution?: string;
-  durationSeconds?: number;
-}
-
-export interface WalletVerifyResponse {
-  walletAddress: string;
-  tier: Tier;
-  tokenBalance: number;
+export interface RenderCounts {
+  today: number
+  limit: number
+  resets_at: string
 }

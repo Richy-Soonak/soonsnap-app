@@ -3,12 +3,33 @@
 @tailwind utilities;
 
 :root {
-  --foreground: #ededed;
-  --background: #0a0a0a;
+  --gold: #FDCA57;
+  --teal: #43C4CC;
+  --void: #0F0F1A;
+  --card: #1a1a2e;
+  --border: #2a2a3e;
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: system-ui, -apple-system, sans-serif;
+  background-color: var(--void);
+  color: #F8F9FC;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--void); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a4e; }
+
+/* Input focus ring */
+input:focus, textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--teal);
+}
+
+/* Auth page background pattern */
+.auth-bg {
+  background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.03) 1px, transparent 0);
+  background-size: 32px 32px;
 }
