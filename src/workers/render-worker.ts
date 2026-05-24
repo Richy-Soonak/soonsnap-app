@@ -74,12 +74,17 @@ async function runCompose(
   tokens: any,
   userTier: string = 'free'
 ): Promise<string> {
-  const nvidiaKey = process.env.NVIDIA_API_KEY
-  if (!nvidiaKey) throw new Error('NVIDIA_API_KEY not set')
+  // API key resolved below from app_config or env
 
   // Fetch LLM config from app_config (dynamic — can be changed from admin panel)
   const configKey = userTier === 'paid' ? 'soonsnap_llm_paid' : 'soonsnap_llm_free'
-  let modelConfig = { model: 'nvidia/llama-3.1-nemotron-nano-8b-v1', max_tokens: 4096, temperature: 0.7 }
+  let modelConfig = {
+    url: 'https://integrate.api.nvidia.com/v1/chat/completions',
+    model: 'nvidia/llama-3.1-nemotron-nano-8b-v1',
+    max_tokens: 4096,
+    temperature: 0.7,
+    api_key: '',
+  }
   try {
     const supabaseUrl = process.env.SUPABASE_URL_INTERNAL || 'http://localhost:8000'
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
@@ -96,7 +101,11 @@ async function runCompose(
     console.log(`[compose] Warning: could not fetch app_config, using defaults: ${e.message}`)
   }
 
-  console.log(`[compose] Generating ${style} composition for ${duration}s (model: ${modelConfig.model}, tokens: ${modelConfig.max_tokens})`)
+  // Resolve API key: config override > env var
+  const apiKey = modelConfig.api_key || process.env.NVIDIA_API_KEY
+  if (!apiKey) throw new Error('No API key available (neither app_config nor NVIDIA_API_KEY env)')
+
+  console.log(`[compose] Generating ${style} composition for ${duration}s (model: ${modelConfig.model}, url: ${modelConfig.url}, tokens: ${modelConfig.max_tokens})`)
 
   const systemPrompt = `You are an expert HTML5 video composition generator. Create a ${duration}-second animated promotional video as a single self-contained HTML file.
 
@@ -113,10 +122,10 @@ RULES:
 - End with CTA showing the site URL
 - Output ONLY the HTML code, no explanations`
 
-  const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+  const response = await fetch(modelConfig.url, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${nvidiaKey}`,
+      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
