@@ -1,7 +1,12 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+// Use the local API proxy to avoid mixed-content (HTTP from HTTPS) issues.
+// The proxy at /api/supabase/* forwards to the actual Supabase instance server-side.
+const supabaseUrl = typeof window !== 'undefined'
+  ? `${window.location.origin}/api/supabase`
+  : (process.env.SUPABASE_URL_INTERNAL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://173.249.36.76:8000')
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
