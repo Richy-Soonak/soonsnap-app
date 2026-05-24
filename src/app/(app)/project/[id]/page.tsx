@@ -319,14 +319,32 @@ export default function ProjectDetailPage() {
                 {' · '}
                 {activeVersion.prompt}
               </span>
-              <a
-                href={videoUrlFor(activeVersion)}
-                download
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(
+                      `/api/download/${projectId}?v=${activeVersion.version_num}`,
+                      { headers: getAuthHeaders() }
+                    )
+                    if (!res.ok) throw new Error('Download failed')
+                    const blob = await res.blob()
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = `soonsnap_${projectId}_v${activeVersion.version_num}.mp4`
+                    document.body.appendChild(a)
+                    a.click()
+                    a.remove()
+                    URL.revokeObjectURL(url)
+                  } catch (err) {
+                    console.error('Download error:', err)
+                  }
+                }}
                 className="rounded-xl bg-teal/10 border border-teal/30 px-4 py-2 text-sm text-teal hover:bg-teal/20 transition-colors flex items-center gap-2"
               >
                 <Download size={14} />
                 Download MP4
-              </a>
+              </button>
             </div>
           </div>
         )

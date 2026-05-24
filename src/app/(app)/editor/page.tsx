@@ -415,13 +415,23 @@ function EditorContent() {
               <h3 className="font-medium">{projectTitle}</h3>
               <p className="text-xs text-[#666]">{style} · {duration}s</p>
             </div>
-            <a
-              href={videoUrl}
-              download
+            <button
+              onClick={async () => {
+                try {
+                  const res = await fetch(`/api/download/${projectId}?v=1`, { headers: getAuthHeaders() })
+                  if (!res.ok) throw new Error('Download failed')
+                  const blob = await res.blob()
+                  const a = document.createElement('a')
+                  a.href = URL.createObjectURL(blob)
+                  a.download = `${projectTitle || 'soonsnap'}.mp4`
+                  a.click()
+                  URL.revokeObjectURL(a.href)
+                } catch { setError('Download failed') }
+              }}
               className="rounded-xl bg-teal/10 border border-teal/30 px-4 py-2 text-sm text-teal hover:bg-teal/20 transition-colors"
             >
               Download MP4
-            </a>
+            </button>
           </div>
         </div>
       )}

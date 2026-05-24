@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import { ToastProvider } from '@/components/ToastProvider'
 
 export const metadata: Metadata = {
   title: 'SoonSnap — AI Website-to-Video',
@@ -14,7 +15,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen bg-void antialiased">
-        {children}
+        <ToastProvider>
+          {children}
+        </ToastProvider>
       </body>
     </html>
   )
