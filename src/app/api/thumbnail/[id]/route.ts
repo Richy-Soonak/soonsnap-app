@@ -1,9 +1,7 @@
 /* eslint-disable */
 import { NextRequest, NextResponse } from 'next/server'
-import { readFileSync, existsSync } from 'fs'
-import { join } from 'path'
 
-const THUMBNAILS_DIR = process.env.THUMBNAILS_DIR || '/tmp/soonsnap-thumbnails'
+const SERVER_URL = process.env.SUPABASE_URL_INTERNAL?.replace(':8000', '') || 'http://173.249.36.76'
 
 export async function GET(
   req: NextRequest,
@@ -11,20 +9,16 @@ export async function GET(
 ) {
   const { id } = await params
   const { searchParams } = new URL(req.url)
-  const version = searchParams.get('v')
+  const version = searchParams.get('v') || '1'
 
-  if (!version) {
-    return NextResponse.json({ ok: false, error: 'Missing ?v= version param' }, { status: 400 })
-  }
+  const thumbUrl = `${SERVER_URL}/soonsnap/thumbnails/${id}_v${version}.jpg`
+  const response = await fetch(thumbUrl)
 
-  const filePath = join(THUMBNAILS_DIR, `${id}_v${version}.jpg`)
-
-  if (!existsSync(filePath)) {
+  if (!response.ok) {
     return NextResponse.json({ ok: false, error: 'Thumbnail not found' }, { status: 404 })
   }
 
-  const buffer = readFileSync(filePath)
-  return new NextResponse(buffer, {
+  return new NextResponse(response.body, {
     headers: {
       'Content-Type': 'image/jpeg',
       'Cache-Control': 'public, max-age=86400',
