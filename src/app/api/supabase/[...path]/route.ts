@@ -4,9 +4,15 @@ const SUPABASE_URL = process.env.SUPABASE_URL_INTERNAL || process.env.NEXT_PUBLI
 const TIMEOUT = 30000
 
 async function proxyRequest(req: NextRequest) {
-  const path = req.nextUrl.pathname.replace('/api/supabase/', '')
+  // Extract path after /api/supabase/ — Next.js catch-all gives us segments
+  const segments = req.nextUrl.pathname
+    .split('/')
+    .filter((s: string) => s && s !== 'api' && s !== 'supabase')
+    .join('/')
   const searchParams = req.nextUrl.searchParams.toString()
-  const targetUrl = `${SUPABASE_URL}/${path}${searchParams ? '?' + searchParams : ''}`
+  const targetUrl = `${SUPABASE_URL}/${segments}${searchParams ? '?' + searchParams : ''}`
+
+  console.log('[supabase-proxy]', req.method, targetUrl)
 
   const headers: Record<string, string> = {}
   // Forward Supabase-specific headers
