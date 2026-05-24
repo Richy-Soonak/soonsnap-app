@@ -71,12 +71,32 @@ async function runCompose(
   style: string,
   duration: number,
   prompt: string,
-  tokens: any
+  tokens: any,
+  userTier: string = 'free'
 ): Promise<string> {
   const nvidiaKey = process.env.NVIDIA_API_KEY
   if (!nvidiaKey) throw new Error('NVIDIA_API_KEY not set')
 
-  console.log(`[compose] Generating ${style} composition for ${duration}s`)
+  // Fetch LLM config from app_config (dynamic — can be changed from admin panel)
+  const configKey = userTier === 'paid' ? 'soonsnap_llm_paid' : 'soonsnap_llm_free'
+  let modelConfig = { model: 'nvidia/llama-3.1-nemotron-nano-8b-v1', max_tokens: 4096, temperature: 0.7 }
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL_INTERNAL || 'http://localhost:8000'
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+    const configRes = await fetch(`${supabaseUrl}/rest/v1/app_config?key=eq.${configKey}&select=value`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+    })
+    if (configRes.ok) {
+      const configRows = await configRes.json() as any[]
+      if (configRows?.[0]?.value) {
+        modelConfig = { ...modelConfig, ...configRows[0].value }
+      }
+    }
+  } catch (e: any) {
+    console.log(`[compose] Warning: could not fetch app_config, using defaults: ${e.message}`)
+  }
+
+  console.log(`[compose] Generating ${style} composition for ${duration}s (model: ${modelConfig.model}, tokens: ${modelConfig.max_tokens})`)
 
   const systemPrompt = `You are an expert HTML5 video composition generator. Create a ${duration}-second animated promotional video as a single self-contained HTML file.
 
@@ -100,13 +120,13 @@ RULES:
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'nvidia/llama-3.1-nemotron-nano-8b-v1',
+      model: modelConfig.model,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: 'Generate the HTML video composition now.' }
       ],
-      temperature: 0.7,
-      max_tokens: 4096,
+      temperature: modelConfig.temperature,
+      max_tokens: modelConfig.max_tokens,
     }),
   })
 
@@ -170,6 +190,24 @@ async function runThumbnail(videoPath: string, thumbnailPath: string): Promise<s
 async function processJob(job: Job): Promise<void> {
   const { input_payload: payload, project_id: projectId } = job
 
+  // Look up user tier for LLM config selection
+  let userTier = 'free'
+  try {
+    const { data: project } = await db
+      .from('soonsnap_projects')
+      .select('user_id')
+      .eq('id', projectId)
+      .single()
+    if (project?.user_id) {
+      const { data: wallet } = await db
+        .from('soonsnap_wallets')
+        .select('tier')
+        .eq('user_id', project.user_id)
+        .single()
+      if (wallet?.tier) userTier = wallet.tier
+    }
+  } catch {}
+
   try {
     if (job.job_type === 'full_pipeline') {
       await updateJobProgress(job.id, 5, 'running')
@@ -181,7 +219,7 @@ async function processJob(job: Job): Promise<void> {
       const tokens = JSON.parse(readFileSync(tokensPath, 'utf-8'))
 
       await updateJobProgress(job.id, 35)
-      await runCompose(projectDir, payload.style, payload.duration, payload.prompt, tokens)
+      await runCompose(projectDir, payload.style, payload.duration, payload.prompt, tokens, userTier)
 
       await updateJobProgress(job.id, 50)
 
