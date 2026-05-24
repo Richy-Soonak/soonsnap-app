@@ -6,7 +6,7 @@ let _db: SupabaseClient | null = null
 
 function getClient(): SupabaseClient {
   if (!_db) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
+    const url = process.env.SUPABASE_URL_INTERNAL || process.env.NEXT_PUBLIC_SUPABASE_URL!
     const key = process.env.SUPABASE_SERVICE_KEY!
     if (!url || !key) throw new Error('NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_KEY must be set')
     _db = createClient(url, key, {

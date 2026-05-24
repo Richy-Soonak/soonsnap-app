@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js'
 import { enqueueJob } from '@/lib/job-queue'
 
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_URL_INTERNAL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://173.249.36.76:8000',
   process.env.SUPABASE_SERVICE_KEY!
 )
 

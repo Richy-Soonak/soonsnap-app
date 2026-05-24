@@ -12,8 +12,8 @@ const path = require('path')
 require('dotenv').config({ path: path.resolve(process.cwd(), '.env.local') })
 
 // Verify env before importing anything else
-if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-  console.error('FATAL: NEXT_PUBLIC_SUPABASE_URL not set')
+if (!(process.env.SUPABASE_URL_INTERNAL || process.env.NEXT_PUBLIC_SUPABASE_URL)) {
+  console.error('FATAL: SUPABASE_URL_INTERNAL or NEXT_PUBLIC_SUPABASE_URL must be set')
   process.exit(1)
 }
 if (!process.env.SUPABASE_SERVICE_KEY) {
