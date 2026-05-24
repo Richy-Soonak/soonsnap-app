@@ -3,15 +3,16 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { Plus, Film, Clock, Zap } from 'lucide-react'
-import type { Project, RenderCounts } from '@/types'
+import { getAuthHeaders } from '@/lib/auth-helpers'
+import { Plus, Film, Clock, Zap, Crown, Shield } from 'lucide-react'
+import type { Project, RenderCounts, Tier } from '@/types'
 
 export default function DashboardPage() {
   const router = useRouter()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [counts] = useState<RenderCounts>({ today: 0, limit: 2, resets_at: '' })
-  const [tier] = useState('free')
+  const [tier, setTier] = useState<Tier>('free')
 
   useEffect(() => {
     loadData()
@@ -30,10 +31,44 @@ export default function DashboardPage() {
       .limit(10)
 
     setProjects(projectData ?? [])
+
+    // Fetch wallet status for tier
+    try {
+      const res = await fetch('/api/wallet/status', { headers: getAuthHeaders() })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.tier) {
+          setTier(data.tier)
+        }
+      }
+    } catch {
+      // keep default free tier
+    }
+
     setLoading(false)
   }
 
   const tierLabel = tier === 'holder' ? 'SOONAK Holder' : tier === 'pro' ? 'Pro' : 'Free'
+
+  function renderTierBadge() {
+    if (tier === 'pro') {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-gold/20 px-2.5 py-0.5 text-xs font-semibold text-gold border border-gold/30 ml-2">
+          <Crown size={11} />
+          Pro ⚡
+        </span>
+      )
+    }
+    if (tier === 'holder') {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-gold/20 px-2.5 py-0.5 text-xs font-semibold text-gold border border-gold/30 ml-2">
+          <Shield size={11} />
+          Holder 👑
+        </span>
+      )
+    }
+    return null
+  }
 
   return (
     <div className="max-w-6xl mx-auto">
@@ -41,8 +76,9 @@ export default function DashboardPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-[#999] text-sm mt-1">
-            {tierLabel} tier · {counts.today}/{counts.limit} renders today
+          <p className="text-[#999] text-sm mt-1 flex items-center">
+            <span>{tierLabel} tier · {counts.today}/{counts.limit} renders today</span>
+            {renderTierBadge()}
           </p>
         </div>
         <button
@@ -75,7 +111,10 @@ export default function DashboardPage() {
             <div className="rounded-lg bg-gold/10 p-2"><Zap size={18} className="text-gold" /></div>
             <span className="text-sm text-[#999]">Tier</span>
           </div>
-          <span className="text-2xl font-bold capitalize">{tierLabel}</span>
+          <span className="text-2xl font-bold capitalize flex items-center gap-2">
+            {tierLabel}
+            {renderTierBadge()}
+          </span>
         </div>
       </div>
 

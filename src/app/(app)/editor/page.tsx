@@ -4,6 +4,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { getAuthHeaders, getJsonAuthHeaders } from '@/lib/auth-helpers'
 import {
   Link as LinkIcon,
   Loader2,
@@ -117,7 +118,7 @@ function EditorContent() {
 
   const pollJob = useCallback(async (jid: string) => {
     try {
-      const res = await fetch(`/api/jobs/${jid}`)
+      const res = await fetch(`/api/jobs/${jid}`, { headers: getAuthHeaders() })
       const data = await res.json()
       if (!data.ok) return
 
@@ -200,7 +201,7 @@ function EditorContent() {
     try {
       const res = await fetch('/api/render', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getJsonAuthHeaders(),
         body: JSON.stringify({
           projectId: pid,
           url: finalUrl,
@@ -228,7 +229,7 @@ function EditorContent() {
     try {
       const res = await fetch('/api/enhance', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getJsonAuthHeaders(),
         body: JSON.stringify({
           prompt,
           style,

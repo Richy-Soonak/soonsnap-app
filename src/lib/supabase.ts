@@ -16,6 +16,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
         if (typeof window !== 'undefined') {
           localStorage.setItem(key, value)
           // Also set a simple cookie so middleware can detect auth
+          // Use the actual Supabase key name (e.g., sb-173-auth-token)
           document.cookie = `${key}=1; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`
         }
       },

@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { getAuthHeaders, getJsonAuthHeaders } from '@/lib/auth-helpers'
 import {
   Film,
   ArrowLeft,
@@ -140,7 +141,7 @@ export default function ProjectDetailPage() {
 
   const pollJob = useCallback(async (jid: string) => {
     try {
-      const res = await fetch(`/api/jobs/${jid}`)
+      const res = await fetch(`/api/jobs/${jid}`, { headers: getAuthHeaders() })
       const data = await res.json()
       if (!data.ok) return
 
@@ -186,7 +187,7 @@ export default function ProjectDetailPage() {
     try {
       const res = await fetch('/api/render', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getJsonAuthHeaders(),
         body: JSON.stringify({
           projectId,
           url: project!.url,
@@ -211,7 +212,7 @@ export default function ProjectDetailPage() {
     try {
       const res = await fetch('/api/enhance', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getJsonAuthHeaders(),
         body: JSON.stringify({ prompt, style, duration, siteTitle: project?.title }),
       })
       const data = await res.json()

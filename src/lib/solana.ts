@@ -1,26 +1,51 @@
-// Solana Web3.js helpers for $SOONAK token verification
-// Install: npm install @solana/web3.js @solana/spl-token
+import { Connection, PublicKey } from '@solana/web3.js'
+import { Tier } from '@/types'
 
-const SOONAK_MINT = process.env.SOONAK_MINT ?? "H218TQViAXsSqwCLnf7L41zewUTRmdN1r4neLtjBXYXS";
-const RPC_URL = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
+const SOONAK_MINT = new PublicKey('H218TQViAXsSqwCLnf7L41zewUTRmdN1r4neLtjBXYXS')
 
 /**
  * Returns the $SOONAK token balance for a given wallet address.
- * Returns 0 if the wallet has no associated token account.
+ * Uses Helius RPC and getTokenAccountsByOwner to find the associated token account.
+ * Returns 0 if the wallet holds no $SOONAK tokens.
  */
-export async function getSoonakBalance(walletAddress: string): Promise<number> {
-  // TODO: implement with @solana/web3.js + @solana/spl-token
-  // 1. Create Connection(RPC_URL)
-  // 2. Derive associated token account for SOONAK_MINT
-  // 3. Fetch balance, convert from lamports with decimals
-  console.log(SOONAK_MINT, RPC_URL, walletAddress);
-  return 0;
+export async function checkSoonakBalance(walletAddress: string): Promise<number> {
+  const rpcUrl = process.env.HELIUS_RPC_URL
+  if (!rpcUrl) {
+    throw new Error('HELIUS_RPC_URL is not configured')
+  }
+
+  const connection = new Connection(rpcUrl, 'confirmed')
+
+  try {
+    const owner = new PublicKey(walletAddress)
+
+    const tokenAccounts = await connection.getTokenAccountsByOwner(owner, {
+      mint: SOONAK_MINT,
+    })
+
+    if (tokenAccounts.value.length === 0) {
+      return 0
+    }
+
+    const tokenAccount = tokenAccounts.value[0].pubkey
+    const balance = await connection.getTokenAccountBalance(tokenAccount)
+
+    if (!balance.value) {
+      return 0
+    }
+
+    // Token balances are returned in UI-compatible string format (already accounting for decimals)
+    return parseFloat(balance.value.uiAmountString ?? '0')
+  } catch (error) {
+    console.error('Error checking SOONAK balance:', error)
+    return 0
+  }
 }
 
 /**
- * Checks whether a wallet qualifies for the Holder tier (≥200 SOONAK).
+ * Determine the tier based on $SOONAK token balance.
+ * Returns 'holder' if balance >= 200, otherwise 'free'.
  */
-export async function isHolder(walletAddress: string): Promise<boolean> {
-  const balance = await getSoonakBalance(walletAddress);
-  return balance >= 200;
+export function determineTier(balance: number): 'free' | 'holder' {
+  return balance >= 200 ? 'holder' : 'free'
 }
