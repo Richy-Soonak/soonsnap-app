@@ -3,7 +3,10 @@
  * SoonSnap Render Worker
  * 
  * Polls soonsnap_jobs for queued work and executes the pipeline:
- *   capture → compose (NIM AI) → render (hyperframes) → thumbnail (ffmpeg)
+ *   capture → compose (AI + HyperFrames) → render → thumbnail
+ * 
+ * Compose uses the HyperFrames skill's reference prompt with validation.
+ * Falls back to template-based composition if AI fails.
  * 
  * Run: npx tsx src/workers/render-worker.ts
  */
@@ -35,13 +38,130 @@ mkdirSync(CAPTURES_DIR, { recursive: true })
 mkdirSync(VIDEOS_DIR, { recursive: true })
 mkdirSync(THUMBNAILS_DIR, { recursive: true })
 
+// ─── HTML Validation (from HyperFrames skill) ───────────────────────────
+function validateComposition(html: string): { valid: boolean; reason?: string } {
+  // 1. Root composition div must exist and have child elements
+  const rootMatch = html.match(/data-composition-id="root"[^>]*>([\s\S]*?)<\/div>\s*<\/body>/)
+  if (!rootMatch || rootMatch[1].replace(/<!--[\s\S]*?-->/g, '').replace(/\s/g, '').length < 50) {
+    return { valid: false, reason: 'Root composition div is empty or near-empty' }
+  }
+  // 2. Must have at least one visible content element
+  const hasContent = /<(img|h[1-6]|p|button|a)\b/.test(rootMatch[1])
+  if (!hasContent) return { valid: false, reason: 'No visible content elements in root div' }
+  // 3. GSAP code should use real API methods
+  const gsapCode = html.match(/gsap\.\w+/g) || []
+  const fakeMethods = gsapCode.filter(m => !['gsap.to','gsap.from','gsap.fromTo','gsap.timeline','gsap.set','gsap.killTweensOf'].includes(m))
+  if (fakeMethods.length > 2) return { valid: false, reason: `Hallucinated GSAP methods: ${fakeMethods.join(', ')}` }
+  // 4. No markdown code fences
+  if (html.includes('```')) return { valid: false, reason: 'Markdown code fences leaked into HTML output' }
+  // 5. No import/require statements
+  if (/import\s|require\s*\(/.test(html)) return { valid: false, reason: 'Import/require statements in HTML' }
+  // 6. Must register timeline
+  if (!html.includes('window.__timelines')) return { valid: false, reason: 'Missing window.__timelines registration' }
+  // 7. Root must have required data attributes
+  if (!html.includes('data-width=') || !html.includes('data-height=') || !html.includes('data-start="0"')) {
+    return { valid: false, reason: 'Root missing required data attributes' }
+  }
+  return { valid: true }
+}
+
+// ─── Template Fallback (from composition-basic.html) ─────────────────────
+function templateCompose(
+  projectDir: string,
+  style: string,
+  duration: number,
+  tokens: any,
+): string {
+  const colors = tokens.colors || ['#111111', '#ffffff', '#3D79FB']
+  const fonts = tokens.fonts || ['sans-serif']
+  const headings = tokens.headings || ['Your Brand']
+  const fontFamily = Array.isArray(fonts) ? fonts[0] : 'sans-serif'
+
+  // Pick colors by role
+  const bgDark = colors.find((c: string) => { const h = parseInt(c.slice(1), 16); return h < 0x333333 }) || colors[0]
+  const bgLight = colors.find((c: string) => { const h = parseInt(c.slice(1), 16); return h > 0xCCCCCC }) || '#ffffff'
+  const accent = colors.find((c: string) => { const r = parseInt(c.slice(1,3),16), g = parseInt(c.slice(3,5),16), b = parseInt(c.slice(5,7),16); return b > r && b > g }) || colors[2] || '#3D79FB'
+
+  const headline = Array.isArray(headings) ? headings[0] : 'Your Brand'
+  const subtitle = Array.isArray(headings) && headings.length > 1 ? headings.slice(0, 3).join(' · ') : 'Built Different'
+  const sceneDur = Math.floor(duration / 3)
+
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+      .scene {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+        visibility: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="root" data-start="0" data-duration="${duration}" data-width="1920" data-height="1080">
+
+      <div id="scene1" class="clip scene" data-start="0" data-duration="${sceneDur}" data-track-index="1"
+           style="background:${bgDark}">
+        <h1 style="font-size:90px; color:${bgLight}; font-family:${fontFamily}; text-align:center;">
+          ${headline}
+        </h1>
+      </div>
+
+      <div id="scene2" class="clip scene" data-start="${sceneDur}" data-duration="${sceneDur}" data-track-index="1"
+           style="background:${accent}">
+        <h1 style="font-size:64px; color:${bgLight}; font-family:${fontFamily}; text-align:center;">
+          ${subtitle}
+        </h1>
+      </div>
+
+      <div id="scene3" class="clip scene" data-start="${sceneDur * 2}" data-duration="${duration - sceneDur * 2}" data-track-index="1"
+           style="background:${bgDark}">
+        <div style="text-align:center;">
+          <h1 style="font-size:72px; color:${accent}; font-family:${fontFamily};">
+            Visit Now
+          </h1>
+        </div>
+      </div>
+
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.set("#scene1", { visibility: "visible" }, 0);
+      tl.from("#scene1", { opacity: 0, scale: 0.8, duration: 0.8 }, 0);
+      tl.from("#scene1 h1", { y: 80, opacity: 0, duration: 0.8, ease: "power3.out" }, 0.3);
+      tl.set("#scene1", { visibility: "hidden" }, ${sceneDur});
+      tl.set("#scene2", { visibility: "visible" }, ${sceneDur});
+      tl.from("#scene2", { opacity: 0, duration: 0.6 }, ${sceneDur});
+      tl.from("#scene2 h1", { y: 60, opacity: 0, duration: 0.8, ease: "power3.out" }, ${sceneDur + 0.3});
+      tl.set("#scene2", { visibility: "hidden" }, ${sceneDur * 2});
+      tl.set("#scene3", { visibility: "visible" }, ${sceneDur * 2});
+      tl.from("#scene3", { opacity: 0, scale: 1.2, duration: 0.6 }, ${sceneDur * 2});
+      tl.from("#scene3 h1", { y: -40, opacity: 0, duration: 0.8, ease: "power3.out" }, ${sceneDur * 2 + 0.3});
+      window.__timelines["root"] = tl;
+    </script>
+  </body>
+</html>`
+
+  const indexPath = join(projectDir, 'index.html')
+  writeFileSync(indexPath, html)
+  console.log(`[compose] Template fallback written (${html.length} chars)`)
+  return indexPath
+}
+
+// ─── Capture ─────────────────────────────────────────────────────────────
 async function runCapture(projectId: string, url: string): Promise<string> {
   const projectDir = join(CAPTURES_DIR, projectId)
   mkdirSync(projectDir, { recursive: true })
 
   console.log(`[capture] Starting for ${url} → ${projectDir}`)
   
-  // hyperframes outputs progress to stderr — capture it but don't treat as error
   try {
     const result = execSync(
       `hyperframes capture "${url}" -o "${projectDir}" --json --max-screenshots 6 --timeout 60000`,
@@ -49,8 +169,6 @@ async function runCapture(projectId: string, url: string): Promise<string> {
     )
     console.log(`[capture] stdout: ${result?.slice(0, 200)}`)
   } catch (err: any) {
-    // execSync throws on non-zero exit or stderr output, even if capture succeeded
-    // Check if files were actually created
     if (!existsSync(join(projectDir, 'extracted', 'tokens.json'))) {
       throw err
     }
@@ -66,6 +184,7 @@ async function runCapture(projectId: string, url: string): Promise<string> {
   return projectDir
 }
 
+// ─── AI Compose (with validation + retry + fallback) ─────────────────────
 async function runCompose(
   projectDir: string,
   style: string,
@@ -74,14 +193,12 @@ async function runCompose(
   tokens: any,
   userTier: string = 'free'
 ): Promise<string> {
-  // API key resolved below from app_config or env
-
-  // Fetch LLM config from app_config (dynamic — can be changed from admin panel)
+  // Fetch LLM config from app_config
   const configKey = userTier === 'paid' ? 'soonsnap_llm_paid' : 'soonsnap_llm_free'
   let modelConfig = {
-    url: 'https://integrate.api.nvidia.com/v1/chat/completions',
-    model: 'nvidia/llama-3.1-nemotron-nano-8b-v1',
-    max_tokens: 4096,
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'deepseek/deepseek-v4-flash:free',
+    max_tokens: 16384,
     temperature: 0.7,
     api_key: '',
   }
@@ -98,129 +215,181 @@ async function runCompose(
       }
     }
   } catch (e: any) {
-    console.log(`[compose] Warning: could not fetch app_config, using defaults: ${e.message}`)
+    console.log(`[compose] Warning: could not fetch app_config: ${e.message}`)
   }
 
   // Resolve API key: config override > env var
-  const apiKey = modelConfig.api_key || process.env.NVIDIA_API_KEY
-  if (!apiKey) throw new Error('No API key available (neither app_config nor NVIDIA_API_KEY env)')
+  const apiKey = modelConfig.api_key || process.env.NVIDIA_API_KEY || ''
+  if (!apiKey) throw new Error('No API key available')
 
-  console.log(`[compose] Generating ${style} composition for ${duration}s (model: ${modelConfig.model}, url: ${modelConfig.url}, tokens: ${modelConfig.max_tokens})`)
+  // Extract site data from tokens
+  const siteColors = tokens.colors?.slice(0, 8) || ['#111111', '#ffffff', '#3D79FB']
+  const siteFonts = tokens.fonts?.slice(0, 3) || ['sans-serif']
+  const siteHeadings = tokens.headings?.slice(0, 5) || []
+  const headline = siteHeadings[0] || 'Your Brand'
+  const subtitle = siteHeadings.slice(1, 3).join(' · ') || 'Built Different'
 
+  // Build the reference-grade prompt from the HyperFrames skill
   const systemPrompt = `You are an expert HTML5 video composition generator for the HyperFrames framework.
 
 TASK: Create a ${duration}-second animated promotional video as a SINGLE self-contained HTML file.
 
 ## MANDATORY HTML STRUCTURE
 
-\`\`\`html
+You MUST follow this EXACT structure. Every attribute is required:
+
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=1920, height=1080" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
-    </style>
-  </head>
-  <body>
-    <div id="root" data-composition-id="root" data-start="0" data-duration="${duration}" data-width="1920" data-height="1080">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1920, height=1080" />
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+  </style>
+</head>
+<body>
+  <div id="root" data-composition-id="root" data-start="0" data-duration="${duration}" data-width="1920" data-height="1080">
 
-      <!-- SCENES: each is a positioned div with class="clip" -->
-      <div id="scene1" class="clip" data-start="0" data-duration="5" data-track-index="1"
-           style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#111;">
-        <h1 style="font-size:80px; color:white;">Headline Text</h1>
-      </div>
+    <!-- Scene clips go here -->
 
-      <div id="scene2" class="clip" data-start="5" data-duration="5" data-track-index="1"
-           style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#222;">
-        <h1 style="font-size:80px; color:white;">Second Scene</h1>
-      </div>
+  </div>
 
-    </div>
-
-    <script>
-      window.__timelines = window.__timelines || {};
-      const tl = gsap.timeline({ paused: true });
-      // Animate scenes: fade in each scene
-      tl.from("#scene1", { opacity: 0, duration: 0.8 }, 0);
-      tl.from("#scene1 h1", { y: 60, duration: 0.8, ease: "power3.out" }, 0.2);
-      tl.from("#scene2", { opacity: 0, duration: 0.8 }, 5);
-      tl.from("#scene2 h1", { y: 60, duration: 0.8, ease: "power3.out" }, 5.2);
-      window.__timelines["root"] = tl;
-    </script>
-  </body>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    // GSAP tweens go here — ONLY .set(), .to(), .from(), .fromTo()
+    window.__timelines["root"] = tl;
+  </script>
+</body>
 </html>
-\`\`\`
 
-## STRICT RULES
+## SCENE CLIP RULES
 
-1. **Root element**: Must have \`data-composition-id="root"\`, \`data-width="1920"\`, \`data-height="1080"\`, \`data-duration="${duration}"\`
-2. **Every visible timed element** MUST have \`class="clip"\` + \`data-start\` + \`data-duration\` + \`data-track-index\`
-3. **GSAP only** — use \`gsap.timeline({ paused: true })\`. Register as \`window.__timelines["root"] = tl;\`
-4. **Allowed GSAP methods**: \`tl.set()\`, \`tl.to()\`, \`tl.from()\`, \`tl.fromTo()\`
-5. **Allowed GSAP properties**: opacity, x, y, scale, scaleX, scaleY, rotation, width, height, visibility
-6. **Position parameter** (3rd arg) sets absolute time: \`tl.to(el, { opacity: 1, duration: 0.5 }, 1.5)\`
-7. **All CSS must be inline or in a single <style> block** — no external stylesheets
-8. **Each scene div** must be \`position: absolute; top:0; left:0; width:100%; height:100%;\`
-9. **NO**: new Timeline(), new Clip(), async, setTimeout, Date.now, Math.random, fetch, external CSS files, repeat: -1
-10. **NO**: markdown code fences, explanations, or commentary — output ONLY raw HTML
+Each scene MUST be a div with ALL of these attributes:
+- class="clip" (required)
+- data-start="N" — when the scene begins (seconds)
+- data-duration="N" — how long the scene lasts (seconds)
+- data-track-index="1" — all scenes on the same track
+- style="position:absolute; top:0; left:0; width:100%; height:100%; visibility:hidden; ..."
+- Use tl.set("#id", { visibility: "visible" }, startTime) to show each scene
+- Use tl.set("#id", { visibility: "hidden" }, startTime + duration) to hide after
 
-## DESIGN BRIEF
+## GSAP RULES (CRITICAL — VIOLATION = WHITE SCREEN)
 
-- Site colors: ${JSON.stringify(tokens.colors?.slice(0, 8) || ['#111', '#fff'])}
-- Site fonts: ${JSON.stringify(tokens.fonts?.slice(0, 3) || ['sans-serif'])}
-- Video style: ${style}
-- Duration: ${duration} seconds
-- ${prompt || 'Create a compelling promotional video showcasing the website.'}
-- End with a CTA scene showing the site URL or brand name
-- Use 3-5 scenes, each 3-5 seconds, with smooth GSAP transitions (fade, slide, scale)
-- Make it visually striking with large text, bold colors, and dynamic animations
+The ONLY valid GSAP methods are:
+- gsap.timeline({ paused: true }) — create timeline (MUST be paused)
+- tl.set(target, vars, timePosition) — set initial/kill state
+- tl.to(target, vars, timePosition) — animate TO values
+- tl.from(target, vars, timePosition) — animate FROM values
+- tl.fromTo(target, fromVars, toVars, timePosition) — animate FROM/TO
+
+The ONLY valid GSAP properties: opacity, x, y, scale, rotation, visibility, autoAlpha, width, height, backgroundColor, color, fontSize, textShadow, boxShadow, ease, duration, stagger
+
+ILLEGAL — DO NOT USE ANY OF THESE:
+- new Timeline() or new Clip() — these DO NOT EXIST
+- gsap.utils.sizeTo() or gsap.utils.anything() — hallucinated API
+- import { tl } from 'gsap/tl' — not a real module
+- tc.repeat(Infinity, ...) — not a real method
+- Any method not in the allowed list above
+
+## ANIMATION PATTERN
+
+For each scene:
+1. tl.set("#sceneId", { visibility: "visible" }, startTime) — make visible
+2. tl.from("#sceneId", { opacity: 0, ... }, startTime) — entrance
+3. tl.from("#sceneId h1", { y: 80, opacity: 0, ... }, startTime + 0.3) — content entrance
+4. tl.set("#sceneId", { visibility: "hidden" }, startTime + duration) — kill visibility
+
+## SITE DATA
+
+URL: ${prompt || 'promotional website'}
+Style: ${style}
+Colors: ${JSON.stringify(siteColors)}
+Fonts: ${JSON.stringify(siteFonts)}
+Headline: ${headline}
+Subtitle: ${subtitle}
+
+## OUTPUT RULES
+
+- Output ONLY raw HTML — no markdown, no code fences, no explanations
+- No new keyword anywhere in the output
+- No import or require statements
+- No async, await, setTimeout, or Date.now()
+- Total data-duration of root must equal ${duration}
+- Use 3-5 scenes with smooth transitions
+- End with a CTA scene showing the brand name
+- Make it visually striking with large text, bold colors, dynamic GSAP animations
 
 OUTPUT ONLY THE COMPLETE HTML FILE. NO MARKDOWN. NO EXPLANATIONS.`
 
-  const response = await fetch(modelConfig.url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: modelConfig.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: 'Generate the HTML video composition now.' }
-      ],
-      temperature: modelConfig.temperature,
-      max_tokens: modelConfig.max_tokens,
-    }),
-  })
+  console.log(`[compose] AI generating ${style} composition (${duration}s, model: ${modelConfig.model})`)
 
-  if (!response.ok) {
-    const errText = await response.text()
-    throw new Error(`NIM API error ${response.status}: ${errText.slice(0, 200)}`)
+  // Attempt AI composition (up to 2 tries)
+  let html = ''
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(modelConfig.url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://soonsnap-app.vercel.app',
+          'X-Title': 'SoonSnap',
+        },
+        body: JSON.stringify({
+          model: modelConfig.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Generate the HTML video composition now. ${duration} seconds, ${style} style. Use these colors: ${JSON.stringify(siteColors)}. Headline: "${headline}". Subtitle: "${subtitle}". Output ONLY the raw HTML file.` }
+          ],
+          temperature: modelConfig.temperature,
+          max_tokens: modelConfig.max_tokens,
+        }),
+      })
+
+      if (!response.ok) {
+        const errText = await response.text()
+        console.log(`[compose] API error on attempt ${attempt}: ${response.status} ${errText.slice(0, 200)}`)
+        continue
+      }
+
+      const json = await response.json()
+      html = json.choices?.[0]?.message?.content || ''
+
+      if (!html) {
+        console.log(`[compose] Empty response on attempt ${attempt}`)
+        continue
+      }
+
+      // Post-processing: strip code fences, thinking preamble
+      html = html.replace(/```html?\n?/gi, '').replace(/```\n?/g, '')
+      const doctypeIdx = html.toLowerCase().indexOf('<!doctype')
+      if (doctypeIdx > 0) html = html.slice(doctypeIdx)
+      const htmlIdx = html.indexOf('<html')
+      if (htmlIdx > 0 && doctypeIdx < 0) html = html.slice(htmlIdx)
+      const closeHtml = html.lastIndexOf('</html>')
+      if (closeHtml > 0) html = html.slice(0, closeHtml + 7)
+
+      // Validate before accepting
+      const validation = validateComposition(html)
+      if (validation.valid) {
+        console.log(`[compose] AI output validated on attempt ${attempt} (${html.length} chars)`)
+        break
+      } else {
+        console.log(`[compose] Validation failed on attempt ${attempt}: ${validation.reason}`)
+        html = '' // Reset for retry
+      }
+    } catch (e: any) {
+      console.log(`[compose] Error on attempt ${attempt}: ${e.message}`)
+    }
   }
 
-  const json = await response.json()
-  let html = json.choices?.[0]?.message?.content || ''
-
-  // Strip markdown code fences and thinking preamble
-  html = html.replace(/```html?\n?/gi, '').replace(/```\n?/g, '')
-  const doctypeIdx = html.indexOf('<!DOCTYPE')
-  if (doctypeIdx > 0) html = html.slice(doctypeIdx)
-  const doctypeIdx2 = html.indexOf('<!doctype')
-  if (doctypeIdx2 > 0) html = html.slice(doctypeIdx2)
-  const htmlIdx = html.indexOf('<html')
-  if (htmlIdx > 0 && doctypeIdx < 0 && doctypeIdx2 < 0) html = html.slice(htmlIdx)
-  // Remove any trailing text after </html>
-  const closeHtml = html.lastIndexOf('</html>')
-  if (closeHtml > 0) html = html.slice(0, closeHtml + 7)
-
-  if (!html.includes('data-composition-id')) {
-    html = html.replace(/<body>/, `<body>\n<div data-composition-id="root" data-width="1920" data-height="1080" data-start="0" data-duration="${duration}">`)
-    html = html.replace(/<\/body>/, '</div>\n</body>')
+  // If AI failed, fall back to template
+  if (!html) {
+    console.log(`[compose] AI composition failed — using template fallback`)
+    return templateCompose(projectDir, style, duration, tokens)
   }
 
   const indexPath = join(projectDir, 'index.html')
@@ -229,6 +398,7 @@ OUTPUT ONLY THE COMPLETE HTML FILE. NO MARKDOWN. NO EXPLANATIONS.`
   return indexPath
 }
 
+// ─── Render ──────────────────────────────────────────────────────────────
 async function runRender(projectDir: string, outputPath: string): Promise<string> {
   console.log(`[render] hyperframes → ${outputPath}`)
 
@@ -245,6 +415,7 @@ async function runRender(projectDir: string, outputPath: string): Promise<string
   return outputPath
 }
 
+// ─── Thumbnail ───────────────────────────────────────────────────────────
 async function runThumbnail(videoPath: string, thumbnailPath: string): Promise<string> {
   console.log(`[thumbnail] Extracting frame`)
   
@@ -261,6 +432,7 @@ async function runThumbnail(videoPath: string, thumbnailPath: string): Promise<s
   return existsSync(thumbnailPath) ? thumbnailPath : ''
 }
 
+// ─── Job Processor ───────────────────────────────────────────────────────
 async function processJob(job: Job): Promise<void> {
   const { input_payload: payload, project_id: projectId } = job
 
@@ -381,6 +553,7 @@ async function processJob(job: Job): Promise<void> {
   }
 }
 
+// ─── Main Loop ───────────────────────────────────────────────────────────
 async function main() {
   console.log('🚀 SoonSnap Render Worker started')
   console.log(`   Captures: ${CAPTURES_DIR}`)
