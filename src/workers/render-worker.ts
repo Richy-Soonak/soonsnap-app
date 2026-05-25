@@ -481,14 +481,10 @@ async function processJob(job: Job): Promise<void> {
       const projectDir = await runCapture(projectId, payload.url)
 
       await updateJobProgress(job.id, 30)
-      
-      const tokensPath = join(projectDir, 'extracted', 'tokens.json')
-      const tokens = JSON.parse(readFileSync(tokensPath, 'utf-8'))
 
-      await updateJobProgress(job.id, 35)
-      await runCompose(projectDir, payload.style, payload.duration, payload.prompt, tokens, userTier)
-
-      await updateJobProgress(job.id, 50)
+      // Send to SoonSnap Agent for compose + render
+      const agentUrl = process.env.SOONSNAP_AGENT_URL || 'http://localhost:3200'
+      console.log(`[agent] Sending to ${agentUrl}/render`)
 
       const { data: versions } = await db
         .from('soonsnap_versions')
@@ -500,13 +496,48 @@ async function processJob(job: Job): Promise<void> {
       const nextVersion = (versions?.[0]?.version_num || 0) + 1
       const videoFileName = `${projectId}_v${nextVersion}.mp4`
       const videoPath = join(VIDEOS_DIR, videoFileName)
-      
-      await runRender(projectDir, videoPath)
-      await updateJobProgress(job.id, 85)
 
+      const agentRes = await fetch(`${agentUrl}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId: job.id,
+          projectId,
+          url: payload.url,
+          style: payload.style || 'cinematic',
+          duration: payload.duration || 10,
+          prompt: payload.prompt || '',
+          captureDir: projectDir,
+          tier: userTier,
+        }),
+      })
+
+      if (!agentRes.ok) {
+        const errText = await agentRes.text()
+        throw new Error(`Agent returned ${agentRes.status}: ${errText.slice(0, 300)}`)
+      }
+
+      const agentResult = await agentRes.json() as any
+      if (!agentResult.success) {
+        throw new Error(`Agent render failed: ${agentResult.error || 'unknown'}`)
+      }
+
+      // Move video from agent output to our videos dir
+      const agentVideo = agentResult.videoPath
+      if (agentVideo && agentVideo !== videoPath) {
+        execSync(`cp "${agentVideo}" "${videoPath}"`)
+      }
+
+      const agentThumb = agentResult.thumbnailPath
       const thumbFileName = `${projectId}_v${nextVersion}.jpg`
       const thumbPath = join(THUMBNAILS_DIR, thumbFileName)
-      await runThumbnail(videoPath, thumbPath)
+      if (agentThumb) {
+        execSync(`cp "${agentThumb}" "${thumbPath}"`)
+      }
+
+      console.log(`[agent] Render complete — ${agentResult.size} bytes`)
+
+      await updateJobProgress(job.id, 85)
 
       // Create version record
       const { data: version } = await db
