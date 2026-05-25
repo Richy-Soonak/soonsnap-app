@@ -107,20 +107,79 @@ async function runCompose(
 
   console.log(`[compose] Generating ${style} composition for ${duration}s (model: ${modelConfig.model}, url: ${modelConfig.url}, tokens: ${modelConfig.max_tokens})`)
 
-  const systemPrompt = `You are an expert HTML5 video composition generator. Create a ${duration}-second animated promotional video as a single self-contained HTML file.
+  const systemPrompt = `You are an expert HTML5 video composition generator for the HyperFrames framework.
 
-RULES:
-- Root element: <div data-composition-id="root" data-width="1920" data-height="1080" data-start="0" data-duration="${duration}">
-- Use GSAP via <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
-- Register: window.__timelines = {}; window.__timelines["root"] = tl;
-- gsap.timeline({ paused: true }) only
-- All animated elements need class="clip" + data-start + data-duration
-- NO repeat: -1, async, setTimeout, Date.now
-- Colors from site: ${JSON.stringify(tokens.colors?.slice(0, 8) || ['#111', '#fff'])}
-- Fonts: ${JSON.stringify(tokens.fonts?.slice(0, 3) || ['sans-serif'])}
-- Style: ${style}. ${prompt || 'Create a compelling promotional video.'}
-- End with CTA showing the site URL
-- Output ONLY the HTML code, no explanations`
+TASK: Create a ${duration}-second animated promotional video as a SINGLE self-contained HTML file.
+
+## MANDATORY HTML STRUCTURE
+
+\`\`\`html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="root" data-start="0" data-duration="${duration}" data-width="1920" data-height="1080">
+
+      <!-- SCENES: each is a positioned div with class="clip" -->
+      <div id="scene1" class="clip" data-start="0" data-duration="5" data-track-index="1"
+           style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#111;">
+        <h1 style="font-size:80px; color:white;">Headline Text</h1>
+      </div>
+
+      <div id="scene2" class="clip" data-start="5" data-duration="5" data-track-index="1"
+           style="position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#222;">
+        <h1 style="font-size:80px; color:white;">Second Scene</h1>
+      </div>
+
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      // Animate scenes: fade in each scene
+      tl.from("#scene1", { opacity: 0, duration: 0.8 }, 0);
+      tl.from("#scene1 h1", { y: 60, duration: 0.8, ease: "power3.out" }, 0.2);
+      tl.from("#scene2", { opacity: 0, duration: 0.8 }, 5);
+      tl.from("#scene2 h1", { y: 60, duration: 0.8, ease: "power3.out" }, 5.2);
+      window.__timelines["root"] = tl;
+    </script>
+  </body>
+</html>
+\`\`\`
+
+## STRICT RULES
+
+1. **Root element**: Must have \`data-composition-id="root"\`, \`data-width="1920"\`, \`data-height="1080"\`, \`data-duration="${duration}"\`
+2. **Every visible timed element** MUST have \`class="clip"\` + \`data-start\` + \`data-duration\` + \`data-track-index\`
+3. **GSAP only** — use \`gsap.timeline({ paused: true })\`. Register as \`window.__timelines["root"] = tl;\`
+4. **Allowed GSAP methods**: \`tl.set()\`, \`tl.to()\`, \`tl.from()\`, \`tl.fromTo()\`
+5. **Allowed GSAP properties**: opacity, x, y, scale, scaleX, scaleY, rotation, width, height, visibility
+6. **Position parameter** (3rd arg) sets absolute time: \`tl.to(el, { opacity: 1, duration: 0.5 }, 1.5)\`
+7. **All CSS must be inline or in a single <style> block** — no external stylesheets
+8. **Each scene div** must be \`position: absolute; top:0; left:0; width:100%; height:100%;\`
+9. **NO**: new Timeline(), new Clip(), async, setTimeout, Date.now, Math.random, fetch, external CSS files, repeat: -1
+10. **NO**: markdown code fences, explanations, or commentary — output ONLY raw HTML
+
+## DESIGN BRIEF
+
+- Site colors: ${JSON.stringify(tokens.colors?.slice(0, 8) || ['#111', '#fff'])}
+- Site fonts: ${JSON.stringify(tokens.fonts?.slice(0, 3) || ['sans-serif'])}
+- Video style: ${style}
+- Duration: ${duration} seconds
+- ${prompt || 'Create a compelling promotional video showcasing the website.'}
+- End with a CTA scene showing the site URL or brand name
+- Use 3-5 scenes, each 3-5 seconds, with smooth GSAP transitions (fade, slide, scale)
+- Make it visually striking with large text, bold colors, and dynamic animations
+
+OUTPUT ONLY THE COMPLETE HTML FILE. NO MARKDOWN. NO EXPLANATIONS.`
 
   const response = await fetch(modelConfig.url, {
     method: 'POST',
@@ -147,11 +206,17 @@ RULES:
   const json = await response.json()
   let html = json.choices?.[0]?.message?.content || ''
 
-  // Strip thinking preamble
+  // Strip markdown code fences and thinking preamble
+  html = html.replace(/```html?\n?/gi, '').replace(/```\n?/g, '')
   const doctypeIdx = html.indexOf('<!DOCTYPE')
   if (doctypeIdx > 0) html = html.slice(doctypeIdx)
+  const doctypeIdx2 = html.indexOf('<!doctype')
+  if (doctypeIdx2 > 0) html = html.slice(doctypeIdx2)
   const htmlIdx = html.indexOf('<html')
-  if (htmlIdx > 0 && doctypeIdx < 0) html = html.slice(htmlIdx)
+  if (htmlIdx > 0 && doctypeIdx < 0 && doctypeIdx2 < 0) html = html.slice(htmlIdx)
+  // Remove any trailing text after </html>
+  const closeHtml = html.lastIndexOf('</html>')
+  if (closeHtml > 0) html = html.slice(0, closeHtml + 7)
 
   if (!html.includes('data-composition-id')) {
     html = html.replace(/<body>/, `<body>\n<div data-composition-id="root" data-width="1920" data-height="1080" data-start="0" data-duration="${duration}">`)
