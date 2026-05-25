@@ -482,7 +482,6 @@ async function processJob(job: Job): Promise<void> {
 
       await updateJobProgress(job.id, 30)
 
-      // Send to SoonSnap Agent for compose + render
       const agentUrl = process.env.SOONSNAP_AGENT_URL || 'http://localhost:3200'
       console.log(`[agent] Sending to ${agentUrl}/render`)
 
@@ -497,6 +496,10 @@ async function processJob(job: Job): Promise<void> {
       const videoFileName = `${projectId}_v${nextVersion}.mp4`
       const videoPath = join(VIDEOS_DIR, videoFileName)
 
+      // Agent render can take 5-10 minutes — set long timeout
+      const agentController = new AbortController()
+      const agentTimeout = setTimeout(() => agentController.abort(), 660000) // 11 min
+
       const agentRes = await fetch(`${agentUrl}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -510,7 +513,10 @@ async function processJob(job: Job): Promise<void> {
           captureDir: projectDir,
           tier: userTier,
         }),
+        signal: agentController.signal,
       })
+
+      clearTimeout(agentTimeout)
 
       if (!agentRes.ok) {
         const errText = await agentRes.text()
