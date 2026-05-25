@@ -40,28 +40,49 @@ mkdirSync(THUMBNAILS_DIR, { recursive: true })
 
 // ─── HTML Validation (from HyperFrames skill) ───────────────────────────
 function validateComposition(html: string): { valid: boolean; reason?: string } {
-  // 1. Root composition div must exist and have child elements
-  const rootMatch = html.match(/data-composition-id="root"[^>]*>([\s\S]*?)<\/div>\s*<\/body>/)
-  if (!rootMatch || rootMatch[1].replace(/<!--[\s\S]*?-->/g, '').replace(/\s/g, '').length < 50) {
-    return { valid: false, reason: 'Root composition div is empty or near-empty' }
-  }
-  // 2. Must have at least one visible content element
-  const hasContent = /<(img|h[1-6]|p|button|a)\b/.test(rootMatch[1])
-  if (!hasContent) return { valid: false, reason: 'No visible content elements in root div' }
-  // 3. GSAP code should use real API methods
-  const gsapCode = html.match(/gsap\.\w+/g) || []
-  const fakeMethods = gsapCode.filter(m => !['gsap.to','gsap.from','gsap.fromTo','gsap.timeline','gsap.set','gsap.killTweensOf'].includes(m))
-  if (fakeMethods.length > 2) return { valid: false, reason: `Hallucinated GSAP methods: ${fakeMethods.join(', ')}` }
-  // 4. No markdown code fences
-  if (html.includes('```')) return { valid: false, reason: 'Markdown code fences leaked into HTML output' }
-  // 5. No import/require statements
-  if (/import\s|require\s*\(/.test(html)) return { valid: false, reason: 'Import/require statements in HTML' }
-  // 6. Must register timeline
+  // 1. No markdown code fences (quick reject — models love to add these)
+  if (html.includes('```')) return { valid: false, reason: 'Markdown code fences in output' }
+
+  // 2. No import/require statements
+  if (/import\s.*from|require\s*\(/.test(html)) return { valid: false, reason: 'Import/require statements in HTML' }
+
+  // 3. Must NOT use 'new' keyword with GSAP
+  if (/new\s+(gsap|Timeline|Clip)/.test(html)) return { valid: false, reason: 'Fake constructor: new gsap/Timeline/Clip' }
+
+  // 4. Must register timeline properly
   if (!html.includes('window.__timelines')) return { valid: false, reason: 'Missing window.__timelines registration' }
-  // 7. Root must have required data attributes
+
+  // 5. Must use real GSAP API — check for gsap.timeline({ paused: true })
+  if (!html.includes('gsap.timeline')) return { valid: false, reason: 'Missing gsap.timeline() call' }
+
+  // 6. Must have clip elements with data-start (actual scene divs, not scripts)
+  const clipCount = (html.match(/class="clip"/g) || []).length
+  if (clipCount < 1) return { valid: false, reason: `No clip elements found (need class="clip" with data-start)` }
+
+  // 7. Clips must contain visible HTML content (h1-h6, p, img, span, div with text) — NOT just script tags
+  const clipBlocks = html.match(/class="clip"[^>]*>[\s\S]*?<\/div>/g) || []
+  let hasVisualContent = false
+  for (const block of clipBlocks) {
+    if (/<(h[1-6]|p|img|span|button|a)\b/.test(block)) {
+      hasVisualContent = true
+      break
+    }
+  }
+  if (!hasVisualContent) return { valid: false, reason: 'Clips have no visible HTML content (h1-h6, p, img, etc.)' }
+
+  // 8. GSAP methods must be real (tl.set, tl.to, tl.from, tl.fromTo only)
+  const gsapMethods = html.match(/tl\.(\w+)/g) || []
+  const fakeMethods = gsapMethods.filter(m => {
+    const method = m.replace('tl.', '')
+    return !['set', 'to', 'from', 'fromTo', 'call', 'add'].includes(method)
+  })
+  if (fakeMethods.length > 3) return { valid: false, reason: `Hallucinated timeline methods: ${fakeMethods.slice(0, 5).join(', ')}` }
+
+  // 9. Root must have required data attributes
   if (!html.includes('data-width=') || !html.includes('data-height=') || !html.includes('data-start="0"')) {
     return { valid: false, reason: 'Root missing required data attributes' }
   }
+
   return { valid: true }
 }
 
