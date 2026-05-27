@@ -22,6 +22,7 @@ export async function GET(
       type: job.job_type,
       status: job.status,
       progress: job.progress,
+      statusMessage: job.status_message,
       result: job.result_payload,
       error: job.error_message,
       createdAt: job.created_at,

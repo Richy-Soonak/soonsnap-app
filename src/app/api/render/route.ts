@@ -23,15 +23,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Missing projectId' }, { status: 400 })
     }
 
-    // Verify project exists
+    // Verify project exists and get user_id
     const { data: project, error: pErr } = await supabase
       .from('soonsnap_projects')
-      .select('id, url, status')
+      .select('id, url, status, user_id')
       .eq('id', projectId)
       .single()
 
     if (pErr || !project) {
       return NextResponse.json({ ok: false, error: 'Project not found' }, { status: 404 })
+    }
+
+    // Check credit balance before enqueuing
+    if (project.user_id) {
+      const { data: credits, error: cErr } = await supabase
+        .from('soonsnap_credits')
+        .select('balance')
+        .eq('user_id', project.user_id)
+        .single()
+
+      if (cErr || !credits || credits.balance < 1) {
+        return NextResponse.json(
+          { ok: false, error: 'Insufficient credits', balance: credits?.balance || 0 },
+          { status: 402 }
+        )
+      }
     }
 
     // Update project status

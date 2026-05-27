@@ -36,6 +36,7 @@ export interface Job {
   job_type: string
   status: JobStatus
   progress: number
+  status_message: string | null
   input_payload: Record<string, any>
   result_payload: Record<string, any> | null
   error_message: string | null
@@ -100,9 +101,10 @@ export async function claimNextJob(): Promise<Job | null> {
 }
 
 /** Update job progress */
-export async function updateJobProgress(jobId: string, progress: number, status?: JobStatus): Promise<void> {
+export async function updateJobProgress(jobId: string, progress: number, status?: JobStatus, statusMessage?: string): Promise<void> {
   const update: Record<string, any> = { progress }
   if (status) update.status = status
+  if (statusMessage) update.status_message = statusMessage
   await db.from('soonsnap_jobs').update(update).eq('id', jobId)
 }
 

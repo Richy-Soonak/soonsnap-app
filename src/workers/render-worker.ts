@@ -477,10 +477,11 @@ async function processJob(job: Job): Promise<void> {
 
   try {
     if (job.job_type === 'full_pipeline') {
-      await updateJobProgress(job.id, 5, 'running')
+      await updateJobProgress(job.id, 5, 'running', 'Starting capture...')
       const projectDir = await runCapture(projectId, payload.url)
 
-      await updateJobProgress(job.id, 30)
+      await updateJobProgress(job.id, 15, 'running', 'Capturing website screenshots...')
+      await updateJobProgress(job.id, 30, undefined, 'Capture complete, sending to AI agent...')
 
       const agentUrl = process.env.SOONSNAP_AGENT_URL || 'http://localhost:3200'
       console.log(`[agent] Sending to ${agentUrl}/render`)
@@ -499,6 +500,8 @@ async function processJob(job: Job): Promise<void> {
       // Agent render can take 5-10 minutes — set long timeout
       const agentController = new AbortController()
       const agentTimeout = setTimeout(() => agentController.abort(), 660000) // 11 min
+
+      await updateJobProgress(job.id, 40, undefined, 'AI agent composing video...')
 
       const agentRes = await fetch(`${agentUrl}/render`, {
         method: 'POST',
@@ -543,7 +546,7 @@ async function processJob(job: Job): Promise<void> {
 
       console.log(`[agent] Render complete — ${agentResult.size} bytes`)
 
-      await updateJobProgress(job.id, 85)
+      await updateJobProgress(job.id, 85, undefined, 'Finalizing video...')
 
       // Create version record
       const { data: version } = await db
@@ -588,6 +591,34 @@ async function processJob(job: Job): Promise<void> {
         versionId: version?.id,
         versionNum: nextVersion,
       })
+
+      // Deduct credit after successful completion
+      try {
+        const { data: proj } = await db
+          .from('soonsnap_projects')
+          .select('user_id')
+          .eq('id', projectId)
+          .single()
+        if (proj?.user_id) {
+          const { data: cred } = await db
+            .from('soonsnap_credits')
+            .select('balance, total_used')
+            .eq('user_id', proj.user_id)
+            .single()
+          if (cred) {
+            await db
+              .from('soonsnap_credits')
+              .update({
+                balance: Math.max(0, cred.balance - 1),
+                total_used: (cred.total_used || 0) + 1,
+              })
+              .eq('user_id', proj.user_id)
+            console.log(`[credits] Deducted 1 credit for user ${proj.user_id} (balance: ${cred.balance - 1})`)
+          }
+        }
+      } catch (creditErr: any) {
+        console.error(`[credits] Failed to deduct credit: ${creditErr.message}`)
+      }
 
       console.log(`[job ${job.id.slice(0, 8)}] COMPLETE — v${nextVersion}`)
     }

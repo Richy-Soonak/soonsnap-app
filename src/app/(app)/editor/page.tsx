@@ -16,6 +16,8 @@ import {
   MessageSquare,
   RotateCcw,
   TrendingUp,
+  Clock,
+  AlertTriangle,
 } from 'lucide-react'
 import { Suspense } from 'react'
 
@@ -44,6 +46,14 @@ const STEP_LABELS: Record<PipelineStep, string> = {
   failed: 'Failed',
 }
 
+// Stage time estimates in seconds
+const STAGE_ESTIMATES: Record<string, [number, number]> = {
+  queued: [5, 15],
+  capturing: [60, 120],
+  composing: [120, 300],
+  rendering: [120, 200],
+}
+
 export default function EditorPage() {
   return (
     <Suspense fallback={<div className="flex items-center justify-center h-64"><Loader2 size={32} className="animate-spin text-gold" /></div>}>
@@ -52,10 +62,17 @@ export default function EditorPage() {
   )
 }
 
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
 function EditorContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const pollRef = useRef<NodeJS.Timeout | null>(null)
+  const elapsedRef = useRef<NodeJS.Timeout | null>(null)
 
   const [url, setUrl] = useState('')
   const [style, setStyle] = useState('cinematic')
@@ -67,6 +84,9 @@ function EditorContent() {
   const [videoUrl, setVideoUrl] = useState('')
   const [projectTitle, setProjectTitle] = useState('')
   const [progress, setProgress] = useState(0)
+  const [statusMessage, setStatusMessage] = useState('')
+  const [elapsed, setElapsed] = useState(0)
+  const [queuedAt, setQueuedAt] = useState<number>(0)
 
   // Prompt editing
   const [prompt, setPrompt] = useState('')
@@ -78,8 +98,25 @@ function EditorContent() {
   useEffect(() => {
     const pid = searchParams.get('project')
     if (pid) loadProject(pid)
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+      if (elapsedRef.current) clearInterval(elapsedRef.current)
+    }
   }, [searchParams])
+
+  // Elapsed timer
+  useEffect(() => {
+    const isProcessing = ['queued', 'capturing', 'composing', 'rendering'].includes(step)
+    if (isProcessing && queuedAt > 0) {
+      elapsedRef.current = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - queuedAt) / 1000))
+      }, 1000)
+    }
+    if (step === 'complete' || step === 'failed' || step === 'idle') {
+      if (elapsedRef.current) clearInterval(elapsedRef.current)
+    }
+    return () => { if (elapsedRef.current) clearInterval(elapsedRef.current) }
+  }, [step, queuedAt])
 
   async function loadProject(pid: string) {
     const { data } = await supabase
@@ -122,9 +159,10 @@ function EditorContent() {
       const data = await res.json()
       if (!data.ok) return
 
-      const { status, progress: prog, result } = data.job
+      const { status, progress: prog, result, statusMessage: msg, error: jobError } = data.job
 
       setProgress(prog || 0)
+      if (msg) setStatusMessage(msg)
 
       // Map job progress to pipeline steps
       if (status === 'queued') setStep('queued')
@@ -139,7 +177,7 @@ function EditorContent() {
         if (pollRef.current) clearInterval(pollRef.current)
       } else if (status === 'failed') {
         setStep('failed')
-        setError(data.job.error || 'Render failed')
+        setError(jobError || 'Render failed. Please try again.')
         if (pollRef.current) clearInterval(pollRef.current)
       }
     } catch {}
@@ -170,6 +208,9 @@ function EditorContent() {
 
     setStep('queued')
     setProgress(0)
+    setStatusMessage('Queued — waiting for worker...')
+    setQueuedAt(Date.now())
+    setElapsed(0)
 
     let pid = projectId
 
@@ -213,7 +254,15 @@ function EditorContent() {
       })
       const data = await res.json()
 
-      if (!data.ok) throw new Error(data.error || 'Failed to enqueue')
+      if (!data.ok) {
+        // Handle 402 insufficient credits specifically
+        if (res.status === 402) {
+          setError(`Insufficient credits. You have ${data.balance ?? 0} credits remaining. Purchase more to continue.`)
+          setStep('failed')
+          return
+        }
+        throw new Error(data.error || 'Failed to enqueue')
+      }
 
       setJobId(data.jobId)
       startPolling(data.jobId)
@@ -251,6 +300,18 @@ function EditorContent() {
   }
 
   const isProcessing = ['queued', 'capturing', 'composing', 'rendering'].includes(step)
+
+  // Compute estimated remaining time
+  function getEstimatedRemaining(): string | null {
+    if (!isProcessing || queuedAt === 0) return null
+    const [minSec, maxSec] = STAGE_ESTIMATES[step] || [60, 180]
+    // Rough: use midpoint minus half the elapsed
+    const mid = (minSec + maxSec) / 2
+    const remaining = Math.max(minSec / 2, mid - elapsed * 0.5)
+    const min = Math.ceil(remaining / 60)
+    if (min < 1) return '<1 min remaining'
+    return `~${min} min remaining`
+  }
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -359,7 +420,7 @@ function EditorContent() {
           {isProcessing ? (
             <>
               <Loader2 size={18} className="animate-spin" />
-              {STEP_LABELS[step]} {progress > 0 && `(${progress}%)`}
+              {statusMessage || STEP_LABELS[step]} {progress > 0 && `(${progress}%)`}
             </>
           ) : step === 'complete' ? (
             <>
@@ -386,20 +447,49 @@ function EditorContent() {
       {/* Pipeline progress */}
       {isProcessing && (
         <div className="rounded-2xl border border-border bg-card p-6 mb-6">
-          <h3 className="text-sm font-medium text-[#999] mb-4">Pipeline Status</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-[#999]">Pipeline Status</h3>
+            <div className="flex items-center gap-2 text-xs text-[#666]">
+              <Clock size={12} />
+              <span>{formatElapsed(elapsed)}</span>
+            </div>
+          </div>
+
           {/* Progress bar */}
-          <div className="w-full h-2 bg-void rounded-full mb-4 overflow-hidden">
+          <div className="w-full h-2.5 bg-void rounded-full mb-2 overflow-hidden">
             <div
-              className="h-full bg-gold rounded-full transition-all duration-500"
+              className="h-full bg-gold rounded-full transition-all duration-700"
               style={{ width: `${progress}%` }}
             />
           </div>
+
+          {/* Status message from worker */}
+          <p className="text-xs text-gold mb-3">
+            {statusMessage || STEP_LABELS[step]}
+          </p>
+
+          {/* Estimated remaining */}
+          {getEstimatedRemaining() && (
+            <p className="text-xs text-[#555] mb-4">
+              ⏱ {getEstimatedRemaining()}
+            </p>
+          )}
+
+          {/* Queue warning */}
+          {step === 'queued' && elapsed > 10 && (
+            <div className="flex items-center gap-2 text-xs text-yellow-500/80 mb-4 animate-pulse">
+              <AlertTriangle size={12} />
+              Worker busy — your job is next in queue
+            </div>
+          )}
+
+          {/* Step icons */}
           <div className="flex items-center gap-4">
-            <StepIcon done={progress > 30} active={step === 'queued' || step === 'capturing'} failed={false} icon={<Palette size={18} />} label="Capture" />
+            <StepIcon done={progress > 30} active={step === 'queued' || step === 'capturing'} failed={step === 'failed' && progress <= 30} icon={<Palette size={18} />} label="Capture" />
             <div className="flex-1 h-px bg-border" />
-            <StepIcon done={progress > 50} active={step === 'composing'} failed={false} icon={<Sparkles size={18} />} label="Compose" />
+            <StepIcon done={progress > 50} active={step === 'composing'} failed={step === 'failed' && progress > 30 && progress <= 50} icon={<Sparkles size={18} />} label="Compose" />
             <div className="flex-1 h-px bg-border" />
-            <StepIcon done={step === 'complete'} active={step === 'rendering'} failed={false} icon={<Film size={18} />} label="Render" />
+            <StepIcon done={step === 'complete'} active={step === 'rendering'} failed={step === 'failed' && progress > 50} icon={<Film size={18} />} label="Render" />
           </div>
         </div>
       )}
@@ -413,7 +503,7 @@ function EditorContent() {
           <div className="p-4 flex items-center justify-between">
             <div>
               <h3 className="font-medium">{projectTitle}</h3>
-              <p className="text-xs text-[#666]">{style} · {duration}s</p>
+              <p className="text-xs text-[#666]">{style} · {duration}s · {formatElapsed(elapsed)}</p>
             </div>
             <button
               onClick={async () => {
